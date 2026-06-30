@@ -243,10 +243,19 @@ impl State {
         });
 
         let platforms = vec![
-            Platform {x: -400.0, y: 300.0, width: 800.0, height: 20.0},
-            Platform {x: -200.0, y: 150.0, width: 200.0, height: 20.0},
-            Platform {x: 100.0, y: 50.0, width: 200.0, height: 20.0},
-            Platform {x: -300.0, y: 0.0, width: 150.0, height: 20.0},
+            Platform {x: -400.0, y: 300.0, width: 500.0, height: 20.0},
+            Platform {x: 200.0, y: 300.0, width: 300.0, height: 20.0},
+
+            Platform {x: 600.0, y: 240.0, width: 150.0, height: 20.0},
+            Platform {x: 820.0, y: 180.0, width: 150.0, height: 20.0},
+            Platform {x: 1040.0, y: 120.0, width: 150.0, height: 20.0},
+
+            Platform{x: 1300.0, y: 60.0, width: 120.0, height: 20.0},
+            Platform{x: 1500.0, y: 120.0, width: 120.0, height: 20.0},
+            Platform{x: 1700.0, y: 200.0, width: 200.0, height: 20.0},
+
+            Platform{x: -600.0, y: 450.0, width: 200.0, height: 20.0},
+            Platform{x: -850.0, y: 550.0, width: 200.0, height: 20.0},
         ];
 
         let mut player = Player::new();
