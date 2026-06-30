@@ -56,6 +56,50 @@ const PLAYER_SPRITE: [[u8; 12]; 16] = [
     [0,0,0,0,0,0,0,0,0,0,0,0],
 ];
 
+const TILE_SPRITE: [[u8; 8]; 8] = [
+    [0,0,0,0,0,0,0,0],
+    [1,0,0,1,0,0,1,0],
+    [2,2,2,2,2,2,2,2],
+    [2,3,2,2,3,2,2,3],
+    [2,2,2,3,2,2,2,2],
+    [3,2,2,2,2,3,2,2],
+    [2,2,3,2,2,2,3,2],
+    [2,2,2,2,2,2,2,2],
+];
+
+const SKY_SPRITE: [[u8; 4]; 2] = [
+    [30, 60, 130, 255],
+    [80, 140, 210, 255],
+];
+
+fn sky_to_rgba(sprite: &[[u8; 4]; 2]) -> (Vec<u8>, u32, u32){
+    let mut data = Vec::new();
+    for row in sprite.iter(){
+        data.extend_from_slice(row);
+    }
+    (data, 1, 2)
+}
+
+fn tile_to_rgba(sprite: &[[u8; 8]; 8]) -> (Vec<u8>, u32, u32){
+    let palette: [[u8; 4]; 4] = [
+        [90, 180, 90, 255],
+        [70, 150, 70, 255],
+        [120, 80, 50, 255],
+        [95, 60, 35, 255],
+    ];
+
+    let width = 8u32;
+    let height = 8u32;
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+
+    for row in sprite.iter(){
+        for &px in row.iter(){
+            data.extend_from_slice(&palette[px as usize]);
+        }
+    }
+    (data, width, height)
+}
+
 fn sprite_to_rgba(sprite: &[[u8; 12]; 16]) -> (Vec<u8>, u32, u32){
     let palette: [[u8; 4]; 5] = [
     [0, 0, 0, 0],
@@ -85,6 +129,14 @@ struct Player {
     on_ground: bool,
     width: f32,
     height: f32,
+}
+
+struct Coin {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    active: bool,
 }
 
 impl Player {
@@ -149,6 +201,7 @@ fn world_to_clip(wx: f32, wy: f32, cam_x: f32, cam_y: f32, screen_w: f32, screen
 
 fn rect_to_vertices(
     x: f32, y: f32, w: f32, h: f32,
+    uv_repeat_x: f32, uv_repeat_y: f32,
     cam_x: f32, cam_y: f32,
     screen_w: f32, screen_h: f32,
 ) -> (Vec<Vertex>, Vec<u16>){
@@ -159,9 +212,9 @@ fn rect_to_vertices(
 
     let vertices = vec![
         Vertex {position: tl, uv: [0.0, 0.0]},
-        Vertex {position: tr, uv: [1.0, 0.0]},
-        Vertex {position: br, uv: [1.0, 1.0]},
-        Vertex {position: bl, uv: [0.0, 1.0]},
+        Vertex {position: tr, uv: [uv_repeat_x, 0.0]},
+        Vertex {position: br, uv: [uv_repeat_x, uv_repeat_y]},
+        Vertex {position: bl, uv: [0.0, uv_repeat_y]},
     ];
     let indices = vec![0u16, 1, 2, 0, 2, 3];
     (vertices, indices)
@@ -176,8 +229,12 @@ struct State {
     window: Arc<Window>,
     render_pipeline: wgpu::RenderPipeline,
     diffuse_bind_group: wgpu::BindGroup,
+    tile_bind_group: wgpu::BindGroup,
+    sky_bind_group: wgpu::BindGroup,
+    coin_bind_group: wgpu::BindGroup,
     player: Player,
     platforms: Vec<Platform>,
+    coins: Vec<Coin>,
     left: bool,
     right: bool,
     jump: bool,
@@ -324,6 +381,189 @@ impl State {
             label: Some("diffuse_bind_group"),
         });
 
+        let (tile_rgba, tile_w, tile_h) = tile_to_rgba(&TILE_SPRITE);
+
+        let tile_texture_size = wgpu::Extent3d{
+            width: tile_w,
+            height: tile_h,
+            depth_or_array_layers: 1,
+        };
+
+        let tile_texture = device.create_texture(&wgpu::TextureDescriptor{
+            label: Some("tile_texture"),
+            size: tile_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture{
+                texture: &tile_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &tile_rgba,
+            wgpu::ImageDataLayout{
+                offset: 0,
+                bytes_per_row: Some(4 * tile_w),
+                rows_per_image: Some(tile_h),
+            },
+            tile_texture_size,
+        );
+
+        let tile_texture_view = tile_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let tile_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let tile_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor{
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&tile_texture_view),
+                },
+                wgpu::BindGroupEntry{
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&tile_sampler),
+                },
+            ],
+            label: Some("tile_bind_group"),
+        });
+
+        let(sky_rgba, sky_w, sky_h) = sky_to_rgba(&SKY_SPRITE);
+        let sky_texture_size = wgpu::Extent3d{width: sky_w, height: sky_h, depth_or_array_layers: 1};
+        let sky_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky_texture"),
+            size: sky_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{texture: &sky_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All},
+            &sky_rgba,
+            wgpu::ImageDataLayout{offset: 0, bytes_per_row: Some(4 * sky_w), rows_per_image: Some(sky_h)},
+            sky_texture_size,
+        );
+        let sky_texture_view = sky_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let sky_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor{
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{binding: 0, resource: wgpu::BindingResource::TextureView(&sky_texture_view)},
+                wgpu::BindGroupEntry{binding: 1, resource: wgpu::BindingResource::Sampler(&sky_sampler)},
+            ],
+            label: Some("sky_bind_group"),
+        });
+
+        const COIN_SPRITE: [[u8; 8]; 8] = [
+            [0,0,1,1,1,1,0,0],
+            [0,1,2,2,2,2,1,0],
+            [1,2,2,2,2,2,2,1],
+            [1,2,2,3,3,2,2,1],
+            [1,2,2,3,3,2,2,1],
+            [1,2,2,2,2,2,2,1],
+            [0,1,2,2,2,2,1,0],
+            [0,0,1,1,1,1,0,0],
+        ];
+
+        fn coin_to_rgba(sprite: &[[u8; 8]; 8]) -> (Vec<u8>, u32, u32){
+            let palette: [[u8; 4]; 4] = [
+                [0, 0, 0, 0],
+                [200, 120, 30, 255],
+                [255, 200, 50, 255],
+                [255, 255, 200, 255],
+            ];
+            let width = 8u32;
+            let height = 8u32;
+            let mut data = Vec::with_capacity((width * height * 4) as usize);
+            for row in sprite.iter(){
+                for &px in row.iter(){
+                    data.extend_from_slice(&palette[px as usize]);
+                }
+            }
+            (data, width, height)
+        }
+
+        let (coin_rgba, coin_w, coin_h) = coin_to_rgba(&COIN_SPRITE);
+        let coin_texture_size = wgpu::Extent3d{
+            width: coin_w,
+            height: coin_h,
+            depth_or_array_layers: 1,
+        };
+        let coin_texture = device.create_texture(&wgpu::TextureDescriptor{
+            label: Some("coin_texture"),
+            size: coin_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{
+                texture: &coin_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &coin_rgba,
+            wgpu::ImageDataLayout{
+                offset: 0,
+                bytes_per_row: Some(4 * coin_w),
+                rows_per_image: Some(coin_h),
+            },
+            coin_texture_size,
+        );
+        let coin_texture_view = coin_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let coin_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let coin_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&coin_texture_view),
+                },
+                wgpu::BindGroupEntry{
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&coin_sampler),
+                },
+            ],
+            label: Some("coin_bind_group"),
+        });
+
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
             bind_group_layouts: &[&texture_bind_group_layout],
@@ -366,9 +606,9 @@ impl State {
         });
 
         let platforms = vec![
-            Platform {x: -400.0, y: 300.0, width: 500.0, height: 20.0},
-            Platform {x: 200.0, y: 300.0, width: 300.0, height: 20.0},
+            Platform {x: -400.0, y: 300.0, width: 600.0, height: 20.0},
 
+            Platform {x: 200.0, y: 300.0, width: 300.0, height: 20.0},
             Platform {x: 600.0, y: 240.0, width: 150.0, height: 20.0},
             Platform {x: 820.0, y: 180.0, width: 150.0, height: 20.0},
             Platform {x: 1040.0, y: 120.0, width: 150.0, height: 20.0},
@@ -377,8 +617,42 @@ impl State {
             Platform{x: 1500.0, y: 120.0, width: 120.0, height: 20.0},
             Platform{x: 1700.0, y: 200.0, width: 200.0, height: 20.0},
 
+            Platform{x: 1980.0, y: 280.0, width: 180.0, height: 20.0},
+            Platform{x: 2240.0, y: 340.0, width: 160.0, height: 20.0},
+            Platform{x: 2480.0, y: 400.0, width: 160.0, height: 20.0},
+
+            Platform{x: 2720.0, y: 460.0, width: 200.0, height: 20.0},
+
             Platform{x: -600.0, y: 450.0, width: 200.0, height: 20.0},
             Platform{x: -850.0, y: 550.0, width: 200.0, height: 20.0},
+        ];
+
+        let coins = vec![
+            Coin{x: -300.0, y: 280.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: -200.0, y: 280.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: -100.0, y: 280.0, width: 16.0, height: 16.0, active: true},
+
+            Coin{x: 250.0, y: 280.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 320.0, y: 280.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 640.0, y: 220.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 860.0, y: 160.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 1080.0, y: 100.0, width: 16.0, height: 16.0, active: true},
+
+            Coin{x: 1330.0, y: 40.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 1530.0, y: 100.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 1730.0, y: 180.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 1780.0, y: 180.0, width: 16.0, height: 16.0, active: true},
+
+            Coin{x: 2020.0, y: 260.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 2070.0, y: 260.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 2280.0, y: 320.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 2520.0, y: 380.0, width: 16.0, height: 16.0, active: true},
+
+            Coin{x: 2740.0, y: 440.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: 2790.0, y: 440.0, width: 16.0, height: 16.0, active: true},
+
+            Coin{x: -550.0, y: 430.0, width: 16.0, height: 16.0, active: true},
+            Coin{x: -800.0, y: 530.0, width: 16.0, height: 16.0, active: true},
         ];
 
         let mut player = Player::new();
@@ -394,6 +668,10 @@ impl State {
             window,
             render_pipeline,
             diffuse_bind_group,
+            tile_bind_group,
+            sky_bind_group,
+            coin_bind_group,
+            coins,
             player,
             platforms,
             left: false,
@@ -427,6 +705,18 @@ impl State {
         self.last_time = now;
 
         self.player.update(self.left, self.right, self.jump, &self.platforms, dt);
+
+        for coin in &mut self.coins{
+            if coin.active{
+                if self.player.x + self.player.width > coin.x
+                    && self.player.x < coin.x + coin.width
+                    && self.player.y + self.player.height > coin.y 
+                    && self.player.y < coin.y + coin.height
+                {
+                    coin.active = false;
+                }
+            }
+        }
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
@@ -447,39 +737,107 @@ impl State {
         let cam_x = self.player.x + self.player.width / 2.0 - sw / 2.0;
         let cam_y = self.player.y + self.player.height / 2.0 - sh / 2.0;
 
-        let mut all_verticas: Vec<Vertex> = Vec::new();
-        let mut all_indices: Vec<u16> = Vec::new();
-
-        for plat in &self.platforms{
-            let base = all_verticas.len() as u16;
-            let(verts, inds) = rect_to_vertices(
-                plat.x, plat.y, plat.width, plat.height,
+        let mut bg_vertices: Vec<Vertex> = Vec::new();
+        let mut bg_indices: Vec<u16> = Vec::new();
+        {
+            let (verts, inds) = rect_to_vertices(
+                cam_x, cam_y, sw, sh,
+                1.0, 1.0,
                 cam_x, cam_y, sw, sh,
             );
-            all_verticas.extend(verts);
-            all_indices.extend(inds.iter().map(|i| i + base));
+            bg_vertices.extend(verts);
+            bg_indices.extend(inds);
         }
 
-        let base = all_verticas.len() as u16;
+        let bg_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("BG Vertex Buffer"),
+            contents: bytemuck::cast_slice(&bg_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let bg_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("BG Index Buffer"),
+            contents: bytemuck::cast_slice(&bg_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+
+        let mut platform_vertices: Vec<Vertex> = Vec::new();
+        let mut platform_indices: Vec<u16> = Vec::new();
+        for plat in &self.platforms{
+            let base = platform_vertices.len() as u16;
+            let repeat_x = (plat.width / 24.0).max(1.0);
+            let repeat_y = (plat.height / 24.0).max(1.0);
+            let(verts, inds) = rect_to_vertices(
+                plat.x, plat.y, plat.width, plat.height,
+                repeat_x, repeat_y,
+                cam_x, cam_y, sw, sh,
+            );
+            platform_vertices.extend(verts);
+            platform_indices.extend(inds.iter().map(|i| i + base));
+        }
+
+        let mut player_vertices: Vec<Vertex> = Vec::new();
+        let mut player_indices: Vec<u16> = Vec::new();
         let(verts, inds) = rect_to_vertices(
             self.player.x, self.player.y,
             self.player.width, self.player.height,
+            1.0, 1.0,
             cam_x, cam_y, sw, sh,
         );
-        all_verticas.extend(verts);
-        all_indices.extend(inds.iter().map(|i| i + base));
+        player_vertices.extend(verts);
+        player_indices.extend(inds);
 
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&all_verticas),
+        let mut coin_vertices: Vec<Vertex> = Vec::new();
+        let mut coin_indices: Vec<u16> = Vec::new();
+        for coin in &self.coins{
+            if !coin.active {continue; }
+            let base = coin_vertices.len() as u16;
+            let (verts, inds) = rect_to_vertices(
+                coin.x, coin.y,
+                coin.width, coin.height,
+                1.0, 1.0,
+                cam_x, cam_y, sw, sh,
+            );
+            coin_vertices.extend(verts);
+            coin_indices.extend(inds.iter().map(|i| i + base));
+        }
+
+        let platform_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+            label: Some("Platform Vartex Buffer"),
+            contents: bytemuck::cast_slice(&platform_vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(&all_indices),
+        let platform_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+            label: Some("Platform Index Buffer"),
+            contents: bytemuck::cast_slice(&platform_indices),
             usage: wgpu::BufferUsages::INDEX,
         });
+        let player_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+            label: Some("Player Vertex Buffer"),
+            contents: bytemuck::cast_slice(&player_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let player_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+            label: Some("Player Index Buffer"),
+            contents: bytemuck::cast_slice(&player_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let coin_vertex_buffer = if !coin_vertices.is_empty(){
+            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+                label: Some("Coin Vertex Buffer"),
+                contents: bytemuck::cast_slice(&coin_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }))
+        }else{None};
+
+        let coin_index_buffer = if !coin_indices.is_empty(){
+            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+                label: Some("Coin Index Buffer"),
+                contents: bytemuck::cast_slice(&coin_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            }))
+        }else{None};
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -489,9 +847,9 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.02,
-                            g: 0.02,
-                            b: 0.04,
+                            r: 0.12,
+                            g: 0.24,
+                            b: 0.51,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -502,10 +860,28 @@ impl State {
                 timestamp_writes: None,
             });
                 render_pass.set_pipeline(&self.render_pipeline);
+
+                render_pass.set_bind_group(0, &self.sky_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, bg_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(bg_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+
+                render_pass.set_bind_group(0, &self.tile_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, platform_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(platform_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..platform_indices.len() as u32, 0, 0..1);
+
                 render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.draw_indexed(0..all_indices.len() as u32, 0, 0..1);
+                render_pass.set_vertex_buffer(0, player_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(player_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..player_indices.len() as u32, 0, 0..1);
+
+                if let (Some(vb), Some(ib)) = (coin_vertex_buffer.as_ref(), coin_index_buffer.as_ref()){
+                    render_pass.set_bind_group(0, &self.coin_bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, vb.slice(..));
+                    render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
+                    render_pass.draw_indexed(0..coin_indices.len() as u32, 0, 0..1);
+                }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
