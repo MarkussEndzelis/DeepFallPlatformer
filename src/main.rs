@@ -13,7 +13,7 @@ use winit::{
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct Vertex{
     position: [f32; 2],
-    color: [f32; 4],
+    uv: [f32; 2],
 }
 
 impl Vertex{
@@ -30,11 +30,51 @@ impl Vertex{
                 wgpu::VertexAttribute{
                     offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x4,
+                    format: wgpu::VertexFormat::Float32x2,
                 },
             ],
         }
     }
+}
+
+const PLAYER_SPRITE: [[u8; 12]; 16] = [
+    [0,0,0,2,2,2,2,2,2,0,0,0],
+    [0,0,2,4,4,4,4,4,4,1,0,0],
+    [0,2,4,4,4,4,4,4,4,4,1,0],
+    [0,2,4,4,1,1,1,1,4,4,2,0],
+    [0,2,1,1,1,1,1,1,1,1,2,0],
+    [0,2,1,2,1,1,1,1,2,1,2,0],
+    [0,2,1,1,1,1,1,1,1,1,2,0],
+    [0,0,2,1,1,1,1,1,1,2,0,0],
+    [0,0,2,3,3,3,3,3,3,2,0,0],
+    [0,2,3,3,3,3,3,3,3,3,2,0],
+    [0,2,3,3,2,3,3,2,3,3,2,0],
+    [0,2,3,3,2,3,3,2,3,3,2,0],
+    [0,2,1,1,0,0,0,0,1,1,2,0],
+    [0,2,1,1,0,0,0,0,1,1,2,0],
+    [0,2,2,2,0,0,0,0,2,2,2,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+];
+
+fn sprite_to_rgba(sprite: &[[u8; 12]; 16]) -> (Vec<u8>, u32, u32){
+    let palette: [[u8; 4]; 5] = [
+    [0, 0, 0, 0],
+    [240, 200, 170, 255],
+    [40, 30, 30, 255],
+    [60, 120, 220, 255],
+    [90, 60, 40, 255],
+    ];
+
+    let width = 12u32;
+    let height = 16u32;
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+
+    for row in sprite.iter(){
+        for &px in row.iter(){
+            data.extend_from_slice(&palette[px as usize]);
+        }
+    }
+    (data, width, height)
 }
 
 struct Player {
@@ -109,7 +149,6 @@ fn world_to_clip(wx: f32, wy: f32, cam_x: f32, cam_y: f32, screen_w: f32, screen
 
 fn rect_to_vertices(
     x: f32, y: f32, w: f32, h: f32,
-    color: [f32; 4],
     cam_x: f32, cam_y: f32,
     screen_w: f32, screen_h: f32,
 ) -> (Vec<Vertex>, Vec<u16>){
@@ -119,10 +158,10 @@ fn rect_to_vertices(
     let bl = world_to_clip(x, y + h, cam_x, cam_y, screen_w, screen_h);
 
     let vertices = vec![
-        Vertex {position: tl, color},
-        Vertex {position: tr, color},
-        Vertex {position: br, color},
-        Vertex {position: bl, color},
+        Vertex {position: tl, uv: [0.0, 0.0]},
+        Vertex {position: tr, uv: [1.0, 0.0]},
+        Vertex {position: br, uv: [1.0, 1.0]},
+        Vertex {position: bl, uv: [0.0, 1.0]},
     ];
     let indices = vec![0u16, 1, 2, 0, 2, 3];
     (vertices, indices)
@@ -136,6 +175,7 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     window: Arc<Window>,
     render_pipeline: wgpu::RenderPipeline,
+    diffuse_bind_group: wgpu::BindGroup,
     player: Player,
     platforms: Vec<Platform>,
     left: bool,
@@ -201,9 +241,92 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
+        let(sprite_rgba, sprite_w, sprite_h) = sprite_to_rgba(&PLAYER_SPRITE);
+
+        let texture_size = wgpu::Extent3d{
+            width: sprite_w,
+            height: sprite_h,
+            depth_or_array_layers: 1,
+        };
+
+        let diffuse_texture = device.create_texture(&wgpu::TextureDescriptor{
+            label: Some("player_sprite_texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture{
+                texture: &diffuse_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &sprite_rgba,
+            wgpu::ImageDataLayout{
+                offset: 0,
+                bytes_per_row: Some(4 * sprite_w),
+                rows_per_image: Some(sprite_h),
+            },
+            texture_size,
+        );
+
+        let diffuse_texture_view = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
+            entries: &[
+                wgpu::BindGroupLayoutEntry{
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture{
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float{filterable: true},
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry{
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+            label: Some("texture_bind_group_layout"),
+        });
+
+        let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{
+                    binding:0,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                },
+                wgpu::BindGroupEntry{
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                },
+            ],
+            label: Some("diffuse_bind_group"),
+        });
+
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&texture_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -270,6 +393,7 @@ impl State {
             size,
             window,
             render_pipeline,
+            diffuse_bind_group,
             player,
             platforms,
             left: false,
@@ -330,7 +454,6 @@ impl State {
             let base = all_verticas.len() as u16;
             let(verts, inds) = rect_to_vertices(
                 plat.x, plat.y, plat.width, plat.height,
-                [0.3, 0.6, 0.3, 1.0],
                 cam_x, cam_y, sw, sh,
             );
             all_verticas.extend(verts);
@@ -341,7 +464,6 @@ impl State {
         let(verts, inds) = rect_to_vertices(
             self.player.x, self.player.y,
             self.player.width, self.player.height,
-            [0.9, 0.3, 0.3, 1.0],
             cam_x, cam_y, sw, sh,
         );
         all_verticas.extend(verts);
@@ -380,6 +502,7 @@ impl State {
                 timestamp_writes: None,
             });
                 render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..all_indices.len() as u32, 0, 0..1);
