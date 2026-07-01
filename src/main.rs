@@ -88,6 +88,21 @@ const FLAG_SPRITE: [[u8; 8]; 16] = [
     [3,3,3,3,3,0,0,0],
 ];
 
+const ENEMY_SPRITE: [[u8; 12]; 12] = [
+    [0,0,0,1,1,1,1,1,1,0,0,0],
+    [0,0,1,1,1,1,1,1,1,1,0,0],
+    [0,1,2,2,1,1,1,1,2,2,1,0],
+    [0,1,2,2,1,1,1,1,2,2,1,0],
+    [0,1,1,1,1,1,1,1,1,1,1,0],
+    [0,1,1,1,1,1,1,1,1,1,1,0],
+    [0,1,1,1,1,1,1,1,1,1,1,0],
+    [0,1,1,3,3,3,3,3,3,1,1,0],
+    [0,1,1,3,3,3,3,3,3,1,1,0],
+    [0,1,1,1,0,0,0,0,1,1,1,0],
+    [0,1,1,1,0,0,0,0,1,1,1,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+];
+
 const SKY_SPRITE: [[u8; 4]; 2] = [
     [30, 60, 130, 255],
     [80, 140, 210, 255],
@@ -130,6 +145,24 @@ fn flag_to_rgba(sprite: &[[u8; 8]; 16]) -> (Vec<u8>, u32, u32){
     ];
     let width = 8u32;
     let height = 16u32;
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+    for row in sprite.iter(){
+        for &px in row.iter(){
+            data.extend_from_slice(&palette[px as usize]);
+        }
+    }
+    (data, width, height)
+}
+
+fn enemy_to_rgba(sprite: &[[u8; 12]; 12]) -> (Vec<u8>, u32, u32){
+    let palette: [[u8; 4]; 4] = [
+        [0, 0, 0, 0],
+        [200, 50, 50, 255],
+        [255, 255, 255, 255],
+        [120, 30, 30, 255],
+    ];
+    let width = 12u32;
+    let height = 12u32;
     let mut data = Vec::with_capacity((width * height * 4) as usize);
     for row in sprite.iter(){
         for &px in row.iter(){
@@ -211,6 +244,15 @@ struct Goal {
     y: f32,
     width: f32,
     height: f32,
+}
+
+struct Enemy {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    vel_x: f32,
+    alive: bool,
 }
 
 impl Player {
@@ -308,11 +350,14 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     window: Arc<Window>,
     render_pipeline: wgpu::RenderPipeline,
+    hud_pipeline: wgpu::RenderPipeline,
     diffuse_bind_group: wgpu::BindGroup,
     tile_bind_group: wgpu::BindGroup,
     sky_bind_group: wgpu::BindGroup,
     coin_bind_group: wgpu::BindGroup,
     flag_bind_group: wgpu::BindGroup,
+    enemies: Vec<Enemy>,
+    enemy_bind_group: wgpu::BindGroup,
     win_bind_group: wgpu::BindGroup,
     win_texture: wgpu::Texture,
     player: Player,
@@ -691,10 +736,47 @@ impl State {
             label: Some("flag_bind_group"),
         });
 
+        let (enemy_rgba, enemy_w, enemy_h) = enemy_to_rgba(&ENEMY_SPRITE);
+        let enemy_texture_size = wgpu::Extent3d { width: enemy_w, height: enemy_h, depth_or_array_layers: 1};
+        let enemy_texture = device.create_texture(&wgpu::TextureDescriptor{
+            label: Some("enemy_texture"),
+            size: enemy_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{texture: &enemy_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All},
+            &enemy_rgba,
+            wgpu::ImageDataLayout{offset: 0, bytes_per_row: Some(4 * enemy_w), rows_per_image: Some(enemy_h)},
+            enemy_texture_size,
+        );
+        let enemy_texture_view = enemy_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let enemy_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let enemy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{binding: 0, resource: wgpu::BindingResource::TextureView(&enemy_texture_view)},
+                wgpu::BindGroupEntry{binding: 1, resource: wgpu::BindingResource::Sampler(&enemy_sampler)},
+            ],
+            label: Some("enemy_bind_group"),
+        });
+
         let win_text = "You Win!".to_string();
         let win_font_data = include_bytes!("../assets/DejaVuSans.ttf");
         let win_font = Font::try_from_bytes(win_font_data).expect("Failed to load font");
-        let (win_img, win_w, win_h) = render_text_to_image(&win_text, &win_font, 72.0, 512, 128);
+        let (win_img, win_w, win_h) = render_text_to_image(&win_text, &win_font, 100.0, 1024, 256);
         let win_texture_size = wgpu::Extent3d {width: win_w, height: win_h, depth_or_array_layers: 1};
         let win_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("win_texture"),
@@ -831,6 +913,52 @@ impl State {
             multiview: None,
         });
 
+        let hud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("HUD Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState{
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState{
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent{
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent{
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState{
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
         let platforms = vec![
             Platform {x: -400.0, y: 300.0, width: 600.0, height: 20.0},
 
@@ -881,11 +1009,24 @@ impl State {
             Coin{x: -800.0, y: 530.0, width: 16.0, height: 16.0, active: true},
         ];
 
+        let enemies = vec![
+            Enemy{x: 250.0, y: 300.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 650.0, y: 240.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 870.0, y: 180.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 1090.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 1350.0, y: 60.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 1550.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 1750.0, y: 200.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 2030.0, y: 280.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 2290.0, y: 340.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 2530.0, y: 400.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+        ];
+
         let mut player = Player::new();
         player.x = -20.0;
         player.y = 200.0;
 
-        let goal = Goal{x: 2820.0, y: 428.0, width: 32.0, height: 64.0};
+        let goal = Goal{x: 2800.0, y: 460.0 - 64.0, width: 32.0, height: 64.0};
 
         Self {
             surface,
@@ -895,6 +1036,7 @@ impl State {
             size,
             window,
             render_pipeline,
+            hud_pipeline,
             diffuse_bind_group,
             tile_bind_group,
             sky_bind_group,
@@ -911,6 +1053,8 @@ impl State {
             font_bytes,
             coins,
             score: 0,
+            enemy_bind_group,
+            enemies,
             player,
             platforms,
             left: false,
@@ -957,6 +1101,76 @@ impl State {
                 }
             }
         }
+
+        for enemy in &mut self.enemies{
+            if !enemy.alive{continue;}
+            enemy.x += enemy.vel_x * dt;
+
+            for plat in &self.platforms{
+                if enemy.x + enemy.width > plat.x + 5.0
+                    && enemy.x < plat.x + plat.width - 5.0
+                    && enemy.y + enemy.height > plat.y
+                    && enemy.y + enemy.height < plat.y + 20.0
+
+                {
+                    enemy.y = plat.y - enemy.height;
+                    if enemy.x + enemy.width > plat.x + plat.width - 10.0{
+                        enemy.vel_x = -enemy.vel_x.abs();
+                    }else if enemy.x < plat.x + 10.0{
+                        enemy.vel_x = enemy.vel_x.abs();
+                    }
+                }
+            }
+        }
+        
+            for enemy in &mut self.enemies {
+                if !enemy.alive {continue;}
+                if self.player.x + self.player.width > enemy.x + 5.0
+                    && self.player.x < enemy.x + enemy.width - 5.0
+                    && self.player.y + self.player.height > enemy.y + 5.0
+                    && self.player.y < enemy.y + enemy.height - 5.0
+                {
+                    if self.player.vel_y > 0.0 {
+                        enemy.alive = false;
+                        self.score += 1;
+                        self.player.vel_y = -300.0;
+                        println!("Enemy destroyed! Score: {}", self.score);
+                    }else{
+                        self.player.x = -20.0;
+                        self.player.y = 200.0;
+                        self.player.vel_x = 0.0;
+                        self.player.vel_y = 0.0;
+                        self.player.on_ground = false;
+                        self.score = 0;
+                        self.game_won = false;
+                        for coin in &mut self.coins{
+                            coin.active = true;
+                        }
+                        for enemy in &mut self.enemies{
+                            enemy.alive = true;
+                        }
+                        println!("Respawned!");
+                        break;
+                    }
+                }
+            }
+
+        if self.player.y > 1500.0 {
+            self.player.x = -20.0;
+            self.player.y = 200.0;
+            self.player.vel_x = 0.0;
+            self.player.vel_y = 0.0;
+            self.player.on_ground = false;
+            self.score = 0;
+            self.game_won = false;
+            for coin in &mut self.coins{
+                coin.active = true;
+            }
+            for enemy in &mut self.enemies {
+                enemy.alive = true;
+            }
+        }
+
         self.update_score_texture();
 
         if !self.game_won {
@@ -1111,6 +1325,36 @@ impl State {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        let mut enemy_vertices: Vec<Vertex> = Vec::new();
+        let mut enemy_indices: Vec<u16> = Vec::new();
+        for enemy in &self.enemies{
+            if !enemy.alive{continue;}
+            let base = enemy_vertices.len() as u16;
+            let (verts, inds) = rect_to_vertices(
+                enemy.x, enemy.y,
+                enemy.width, enemy.height,
+                1.0, 1.0,
+                cam_x, cam_y, sw, sh,
+            );
+            enemy_vertices.extend(verts);
+            enemy_indices.extend(inds.iter().map(|i| i + base));
+        }
+        let enemy_vertex_buffer = if !enemy_vertices.is_empty(){
+            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Enemy Vertex Buffer"),
+                contents: bytemuck::cast_slice(&enemy_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }))
+        }else{None};
+
+        let enemy_index_buffer = if !enemy_indices.is_empty(){
+            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Enemy Index Buffer"),
+                contents: bytemuck::cast_slice(&enemy_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            }))
+        }else{None};
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -1131,12 +1375,14 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-                render_pass.set_pipeline(&self.render_pipeline);
+                render_pass.set_pipeline(&self.hud_pipeline);
 
                 render_pass.set_bind_group(0, &self.sky_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, bg_vertex_buffer.slice(..));
                 render_pass.set_index_buffer(bg_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+
+
 
                 render_pass.set_bind_group(0, &self.tile_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, platform_vertex_buffer.slice(..));
@@ -1159,7 +1405,16 @@ impl State {
                 render_pass.set_vertex_buffer(0, flag_vertex_buffer.slice(..));
                 render_pass.set_index_buffer(flag_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..flag_indices.len() as u32, 0, 0..1);
+
+                if let (Some(vb), Some(ib)) = (enemy_vertex_buffer.as_ref(), enemy_index_buffer.as_ref()){  
+                    render_pass.set_bind_group(0, &self.enemy_bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, vb.slice(..));
+                    render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
+                    render_pass.draw_indexed(0..enemy_indices.len() as u32, 0, 0..1);
+                }
         }
+
+        
         
         let hud_width = 256.0;
         let hud_height = 64.0;
@@ -1207,7 +1462,7 @@ impl State {
                 timestamp_writes: None,
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_pipeline(&self.hud_pipeline);
             render_pass.set_bind_group(0, &self.score_bind_group, &[]);
             render_pass.set_vertex_buffer(0, hud_vertex_buffer.slice(..));
             render_pass.set_index_buffer(hud_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
@@ -1254,7 +1509,7 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_pipeline(&self.hud_pipeline);
             render_pass.set_bind_group(0, &self.win_bind_group, &[]);
             render_pass.set_vertex_buffer(0, win_vb.slice(..));
             render_pass.set_index_buffer(win_ib.slice(..), wgpu::IndexFormat::Uint16);
