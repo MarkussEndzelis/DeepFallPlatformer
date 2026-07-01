@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
+use rusttype::{Font, Scale, point};
+use image::{ImageBuffer, Rgba};
 
 use winit::{
     event::{Event, WindowEvent, KeyEvent, ElementState},
@@ -67,6 +69,25 @@ const TILE_SPRITE: [[u8; 8]; 8] = [
     [2,2,2,2,2,2,2,2],
 ];
 
+const FLAG_SPRITE: [[u8; 8]; 16] = [
+    [0,0,1,1,1,1,0,0],
+    [0,0,1,2,2,2,0,0],
+    [0,0,1,2,2,2,0,0],
+    [0,0,1,2,2,2,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,0,1,0,0,0,0,0],
+    [0,3,3,3,0,0,0,0],
+    [0,3,3,3,0,0,0,0],
+    [3,3,3,3,3,0,0,0],
+    [3,3,3,3,3,0,0,0],
+];
+
 const SKY_SPRITE: [[u8; 4]; 2] = [
     [30, 60, 130, 255],
     [80, 140, 210, 255],
@@ -100,6 +121,24 @@ fn tile_to_rgba(sprite: &[[u8; 8]; 8]) -> (Vec<u8>, u32, u32){
     (data, width, height)
 }
 
+fn flag_to_rgba(sprite: &[[u8; 8]; 16]) -> (Vec<u8>, u32, u32){
+    let palette: [[u8; 4]; 4] = [
+    [0, 0, 0, 0],
+    [80, 60, 40, 255],
+    [220, 50, 50, 255],
+    [60, 40, 20, 255],
+    ];
+    let width = 8u32;
+    let height = 16u32;
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+    for row in sprite.iter(){
+        for &px in row.iter(){
+            data.extend_from_slice(&palette[px as usize]);
+        }
+    }
+    (data, width, height)
+}
+
 fn sprite_to_rgba(sprite: &[[u8; 12]; 16]) -> (Vec<u8>, u32, u32){
     let palette: [[u8; 4]; 5] = [
     [0, 0, 0, 0],
@@ -121,6 +160,34 @@ fn sprite_to_rgba(sprite: &[[u8; 12]; 16]) -> (Vec<u8>, u32, u32){
     (data, width, height)
 }
 
+fn render_text_to_image(text: &str, font: &Font, font_size: f32, width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let scale = Scale::uniform(font_size);
+    let glyphs: Vec<_> = font.layout(text, scale, point(0.0, 0.0)).collect();
+
+    let mut img = ImageBuffer::<Rgba<u8>, _>::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+
+    for g in glyphs {
+        if let Some(_bb) = g.pixel_bounding_box() {
+            let pos = g.position();
+            let x_offset = pos.x as i32;
+            let y_offset = pos.y as i32;
+            g.draw(|dx, dy, v| {
+                let px = x_offset + dx as i32;
+                let py = y_offset + dy as i32;
+                if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {
+                    let alpha = (v * 255.0) as u8;
+                    if alpha > 0 {
+                        let pixel = img.get_pixel_mut(px as u32, py as u32);
+                        *pixel = Rgba([255, 255, 255, alpha]);
+                    }
+                }
+            });
+        }
+    }
+    let raw = img.into_raw();
+    (raw, width, height)
+}
+
 struct Player {
     x: f32,
     y: f32,
@@ -137,6 +204,13 @@ struct Coin {
     width: f32,
     height: f32,
     active: bool,
+}
+
+struct Goal {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
 }
 
 impl Player {
@@ -199,6 +273,12 @@ fn world_to_clip(wx: f32, wy: f32, cam_x: f32, cam_y: f32, screen_w: f32, screen
     [cx, cy]
 }
 
+fn screen_to_clip(sx: f32, sy: f32, screen_w: f32, screen_h: f32) -> [f32; 2]{
+    let cx = (sx / screen_w) * 2.0 - 1.0;
+    let cy = 1.0 - (sy / screen_h) * 2.0;
+    [cx, cy]
+}
+
 fn rect_to_vertices(
     x: f32, y: f32, w: f32, h: f32,
     uv_repeat_x: f32, uv_repeat_y: f32,
@@ -232,13 +312,24 @@ struct State {
     tile_bind_group: wgpu::BindGroup,
     sky_bind_group: wgpu::BindGroup,
     coin_bind_group: wgpu::BindGroup,
+    flag_bind_group: wgpu::BindGroup,
+    win_bind_group: wgpu::BindGroup,
+    win_texture: wgpu::Texture,
     player: Player,
     platforms: Vec<Platform>,
     coins: Vec<Coin>,
+    score: u32,
+    score_texture: wgpu::Texture,
+    score_texture_view: wgpu::TextureView,
+    score_bind_group: wgpu::BindGroup,
+    score_sampler: wgpu::Sampler,
+    goal: Goal,
+    game_won: bool,
     left: bool,
     right: bool,
     jump: bool,
     last_time: std::time::Instant,
+    font_bytes: Vec<u8>,
 }
 
 impl State {
@@ -564,6 +655,141 @@ impl State {
             label: Some("coin_bind_group"),
         });
 
+        let (flag_rgba, flag_w, flag_h) = flag_to_rgba(&FLAG_SPRITE);
+        let flag_texture_size = wgpu::Extent3d {width: flag_w, height: flag_h, depth_or_array_layers: 1};
+        let flag_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("flag_texture"),
+            size: flag_texture_size,
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{texture: &flag_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All},
+            &flag_rgba,
+            wgpu::ImageDataLayout{offset: 0, bytes_per_row: Some(4 * flag_w), rows_per_image: Some(flag_h)},
+            flag_texture_size,
+        );
+        let flag_texture_view = flag_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let flag_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let flag_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor{
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{binding: 0, resource: wgpu::BindingResource::TextureView(&flag_texture_view)},
+                wgpu::BindGroupEntry{binding: 1, resource: wgpu::BindingResource::Sampler(&flag_sampler)},
+            ],
+            label: Some("flag_bind_group"),
+        });
+
+        let win_text = "You Win!".to_string();
+        let win_font_data = include_bytes!("../assets/DejaVuSans.ttf");
+        let win_font = Font::try_from_bytes(win_font_data).expect("Failed to load font");
+        let (win_img, win_w, win_h) = render_text_to_image(&win_text, &win_font, 72.0, 512, 128);
+        let win_texture_size = wgpu::Extent3d {width: win_w, height: win_h, depth_or_array_layers: 1};
+        let win_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("win_texture"),
+            size: win_texture_size,
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{texture: &win_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All},
+            &win_img,
+            wgpu::ImageDataLayout{offset: 0, bytes_per_row: Some(4 * win_w), rows_per_image: Some(win_h)},
+            win_texture_size,
+        );
+        let win_texture_view = win_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let win_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let win_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{binding: 0, resource: wgpu::BindingResource::TextureView(&win_texture_view)},
+                wgpu::BindGroupEntry{binding: 1, resource: wgpu::BindingResource::Sampler(&win_sampler)},
+            ],
+            label: Some("win_bind_group"),
+        });
+
+        let font_data = include_bytes!("../assets/DejaVuSans.ttf");
+        let font = Font::try_from_bytes(font_data).expect("Failed to load font");
+        let font_bytes = font_data.to_vec();
+
+        let score_text = "Score: 0".to_string();
+        let (img, width, height) = render_text_to_image(&score_text, &font, 28.0, 256, 64);
+
+        let score_texture_size = wgpu::Extent3d{
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        };
+        let score_texture = device.create_texture(&wgpu::TextureDescriptor{
+            label: Some("score_texture"),
+            size: score_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{
+                texture: &score_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img,
+            wgpu::ImageDataLayout{
+                offset: 0,
+                bytes_per_row: Some(4 * width as u32),
+                rows_per_image: Some(height as u32),
+            },
+            score_texture_size,
+        );
+
+        let score_texture_view = score_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let score_sampler = device.create_sampler(&wgpu::SamplerDescriptor{
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let score_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor{
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&score_texture_view),
+                },
+                wgpu::BindGroupEntry{
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&score_sampler),
+                },
+            ],
+            label: Some("score_bind_group"),
+        });
+
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
             bind_group_layouts: &[&texture_bind_group_layout],
@@ -659,6 +885,8 @@ impl State {
         player.x = -20.0;
         player.y = 200.0;
 
+        let goal = Goal{x: 2820.0, y: 428.0, width: 32.0, height: 64.0};
+
         Self {
             surface,
             device,
@@ -671,7 +899,18 @@ impl State {
             tile_bind_group,
             sky_bind_group,
             coin_bind_group,
+            score_texture,
+            score_texture_view,
+            score_bind_group,
+            score_sampler,
+            goal,
+            game_won: false,
+            flag_bind_group,
+            win_bind_group,
+            win_texture,
+            font_bytes,
             coins,
+            score: 0,
             player,
             platforms,
             left: false,
@@ -714,7 +953,19 @@ impl State {
                     && self.player.y < coin.y + coin.height
                 {
                     coin.active = false;
+                    self.score += 1;
                 }
+            }
+        }
+        self.update_score_texture();
+
+        if !self.game_won {
+            if self.player.x + self.player.width > self.goal.x
+                && self.player.x < self.goal.x + self.goal.width
+                && self.player.y + self.player.height > self.goal.y
+                && self.player.y < self.goal.y + self.goal.height
+            {
+                self.game_won = true;
             }
         }
     }
@@ -839,6 +1090,27 @@ impl State {
             }))
         }else{None};
 
+        let mut flag_vertices: Vec<Vertex> = Vec::new();
+        let mut flag_indices: Vec<u16> = Vec::new();
+        let (verts, inds) = rect_to_vertices(
+            self.goal.x, self.goal.y,
+            self.goal.width, self.goal.height,
+            1.0, 1.0,
+            cam_x, cam_y, sw, sh,
+        );
+        flag_vertices.extend(verts);
+        flag_indices.extend(inds);
+        let flag_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Flag Vertex Buffer"),
+            contents: bytemuck::cast_slice(&flag_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let flag_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Flag Index Buffer"),
+            contents: bytemuck::cast_slice(&flag_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -882,12 +1154,144 @@ impl State {
                     render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..coin_indices.len() as u32, 0, 0..1);
                 }
+                
+                render_pass.set_bind_group(0, &self.flag_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, flag_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(flag_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..flag_indices.len() as u32, 0, 0..1);
+        }
+        
+        let hud_width = 256.0;
+        let hud_height = 64.0;
+        let hud_x = 20.0;
+        let hud_y = 20.0;
+
+        let tl = screen_to_clip(hud_x, hud_y, sw, sh);
+        let tr = screen_to_clip(hud_x + hud_width, hud_y, sw, sh);
+        let br = screen_to_clip(hud_x + hud_width, hud_y + hud_height, sw, sh);
+        let bl = screen_to_clip(hud_x, hud_y + hud_height, sw, sh);
+
+        let hud_vertices = vec![
+            Vertex { position: tl, uv: [0.0, 0.0] },
+            Vertex { position: tr, uv: [1.0, 0.0] },
+            Vertex { position: br, uv: [1.0, 1.0] },
+            Vertex { position: bl, uv: [0.0, 1.0] },
+        ];
+
+        let hud_indices = vec![0u16, 1, 2, 0, 2, 3];
+
+        let hud_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+            label: Some("HUD Vertex Buffer"),
+            contents: bytemuck::cast_slice(&hud_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let hud_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor{
+            label: Some("HUD Index Buffer"),
+            contents: bytemuck::cast_slice(&hud_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor{
+                label: Some("HUD Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment{
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations{
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.score_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, hud_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(hud_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..hud_indices.len() as u32, 0, 0..1);
+        }
+
+        if self.game_won {
+            let win_w = 512.0;
+            let win_h = 128.0;
+            let win_x = (sw - win_w) / 2.0;
+            let win_y = (sh - win_h) / 2.0;
+            let tl = screen_to_clip(win_x, win_y, sw, sh);
+            let tr = screen_to_clip(win_x + win_w, win_y, sw, sh);
+            let br = screen_to_clip(win_x + win_w, win_y + win_h, sw, sh);
+            let bl = screen_to_clip(win_x, win_y + win_h, sw, sh);
+            let win_vertices = vec![
+                Vertex { position: tl, uv: [0.0, 0.0] },
+                Vertex { position: tr, uv: [1.0, 0.0] },
+                Vertex { position: br, uv: [1.0, 1.0] },
+                Vertex { position: bl, uv: [0.0, 1.0] },
+            ];
+            let win_indices = vec![0u16, 1, 2, 0, 2, 3];
+            let win_vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Win VB"),
+                contents: bytemuck::cast_slice(&win_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let win_ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Win IB"),
+                contents: bytemuck::cast_slice(&win_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Win Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.win_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, win_vb.slice(..));
+            render_pass.set_index_buffer(win_ib.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..win_indices.len() as u32, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
         Ok(())
+    }
+
+    fn update_score_texture(&mut self){
+        let font = Font::try_from_bytes(&self.font_bytes).expect("Failed to load font");
+        let text = format!("Score: {}", self.score);
+        let (img, width, height) = render_text_to_image(&text, &font, 28.0, 256, 64);
+
+        let size = wgpu::Extent3d{
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture{
+                texture: &self.score_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img,
+            wgpu::ImageDataLayout{
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
     }
 }
 
