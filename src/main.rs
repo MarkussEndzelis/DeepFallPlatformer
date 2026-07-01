@@ -252,7 +252,9 @@ struct Enemy {
     width: f32,
     height: f32,
     vel_x: f32,
+    vel_y: f32,
     alive: bool,
+    platform_id: usize,
 }
 
 impl Player {
@@ -1010,16 +1012,16 @@ impl State {
         ];
 
         let enemies = vec![
-            Enemy{x: 250.0, y: 300.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 650.0, y: 240.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 870.0, y: 180.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 1090.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 1350.0, y: 60.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 1550.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 1750.0, y: 200.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 2030.0, y: 280.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 2290.0, y: 340.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
-            Enemy{x: 2530.0, y: 400.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true},
+            Enemy{x: 250.0, y: 300.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 1},
+            Enemy{x: 650.0, y: 240.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 2},
+            Enemy{x: 870.0, y: 180.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 3},
+            Enemy{x: 1090.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 4},
+            Enemy{x: 1350.0, y: 60.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 5},
+            Enemy{x: 1550.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 6},
+            Enemy{x: 1750.0, y: 200.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 7},
+            Enemy{x: 2030.0, y: 280.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 8},
+            Enemy{x: 2290.0, y: 340.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 9},
+            Enemy{x: 2530.0, y: 400.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 10},
         ];
 
         let mut player = Player::new();
@@ -1102,25 +1104,27 @@ impl State {
             }
         }
 
-        for enemy in &mut self.enemies{
-            if !enemy.alive{continue;}
+        let enemy_gravity = 400.0;
+
+        for enemy in &mut self.enemies {
+            if !enemy.alive {continue; }
+
+            let plat = &self.platforms[enemy.platform_id];
+
             enemy.x += enemy.vel_x * dt;
 
-            for plat in &self.platforms{
-                if enemy.x + enemy.width > plat.x + 5.0
-                    && enemy.x < plat.x + plat.width - 5.0
-                    && enemy.y + enemy.height > plat.y
-                    && enemy.y + enemy.height < plat.y + 20.0
+            let margin = 5.0;
+            let left_edge = plat.x + margin;
+            let right_edge = plat.x + plat.width - enemy.width - margin;
 
-                {
-                    enemy.y = plat.y - enemy.height;
-                    if enemy.x + enemy.width > plat.x + plat.width - 10.0{
-                        enemy.vel_x = -enemy.vel_x.abs();
-                    }else if enemy.x < plat.x + 10.0{
-                        enemy.vel_x = enemy.vel_x.abs();
-                    }
-                }
+            if enemy.x < left_edge {
+                enemy.x = left_edge;
+                enemy.vel_x = enemy.vel_x.abs();
+            }else if enemy.x > right_edge {
+                enemy.x = right_edge;
+                enemy.vel_x = -enemy.vel_x.abs();
             }
+            enemy.y = plat.y - enemy.height;
         }
         
             for enemy in &mut self.enemies {
