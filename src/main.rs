@@ -252,7 +252,6 @@ struct Enemy {
     width: f32,
     height: f32,
     vel_x: f32,
-    vel_y: f32,
     alive: bool,
     platform_id: usize,
 }
@@ -361,6 +360,7 @@ struct State {
     enemies: Vec<Enemy>,
     enemy_bind_group: wgpu::BindGroup,
     win_bind_group: wgpu::BindGroup,
+    gameover_bind_group: wgpu::BindGroup,
     win_texture: wgpu::Texture,
     player: Player,
     platforms: Vec<Platform>,
@@ -372,6 +372,8 @@ struct State {
     score_sampler: wgpu::Sampler,
     goal: Goal,
     game_won: bool,
+    lives: u32,
+    game_over: bool,
     left: bool,
     right: bool,
     jump: bool,
@@ -810,6 +812,42 @@ impl State {
             label: Some("win_bind_group"),
         });
 
+        let gameover_text = "Game Over".to_string();
+        let gameover_font_data = include_bytes!("../assets/DejaVuSans.ttf");
+        let gameover_font = Font::try_from_bytes(gameover_font_data).expect("Failed to load font");
+        let (gameover_img, gameover_w, gameover_h) = render_text_to_image(&gameover_text, &gameover_font, 72.0, 512, 128);
+        let gameover_texture_size = wgpu::Extent3d{width: gameover_w, height: gameover_h, depth_or_array_layers: 1};
+        let gameover_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("gameover_texture"),
+            size: gameover_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{texture: &gameover_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All},
+            &gameover_img,
+            wgpu::ImageDataLayout{offset: 0, bytes_per_row: Some(4 * gameover_w), rows_per_image: Some(gameover_h)},
+            gameover_texture_size,
+        );
+        let gameover_texture_view = gameover_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let gameover_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let gameover_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{binding: 0, resource: wgpu::BindingResource::TextureView(&gameover_texture_view)},
+                wgpu::BindGroupEntry{binding: 1, resource: wgpu::BindingResource::Sampler(&gameover_sampler)},
+            ],
+            label: Some("gameover_bind_group"),
+        });
+
         let font_data = include_bytes!("../assets/DejaVuSans.ttf");
         let font = Font::try_from_bytes(font_data).expect("Failed to load font");
         let font_bytes = font_data.to_vec();
@@ -1012,16 +1050,16 @@ impl State {
         ];
 
         let enemies = vec![
-            Enemy{x: 250.0, y: 300.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 1},
-            Enemy{x: 650.0, y: 240.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 2},
-            Enemy{x: 870.0, y: 180.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 3},
-            Enemy{x: 1090.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 4},
-            Enemy{x: 1350.0, y: 60.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 5},
-            Enemy{x: 1550.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 6},
-            Enemy{x: 1750.0, y: 200.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 7},
-            Enemy{x: 2030.0, y: 280.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 8},
-            Enemy{x: 2290.0, y: 340.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 9},
-            Enemy{x: 2530.0, y: 400.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, vel_y: 0.0, alive: true, platform_id: 10},
+            Enemy{x: 250.0, y: 300.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 1},
+            Enemy{x: 650.0, y: 240.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0, alive: true, platform_id: 2},
+            Enemy{x: 870.0, y: 180.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 3},
+            Enemy{x: 1090.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 4},
+            Enemy{x: 1350.0, y: 60.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 5},
+            Enemy{x: 1550.0, y: 120.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 6},
+            Enemy{x: 1750.0, y: 200.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 7},
+            Enemy{x: 2030.0, y: 280.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 8},
+            Enemy{x: 2290.0, y: 340.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 9},
+            Enemy{x: 2530.0, y: 400.0 - 40.0, width: 40.0, height: 40.0, vel_x: 80.0,  alive: true, platform_id: 10},
         ];
 
         let mut player = Player::new();
@@ -1049,8 +1087,11 @@ impl State {
             score_sampler,
             goal,
             game_won: false,
+            lives: 3,
+            game_over: false,
             flag_bind_group,
             win_bind_group,
+            gameover_bind_group,
             win_texture,
             font_bytes,
             coins,
@@ -1080,8 +1121,30 @@ impl State {
             KeyCode::ArrowLeft | KeyCode::KeyA => self.left = pressed,
             KeyCode::ArrowRight | KeyCode::KeyD => self.right = pressed,
             KeyCode::Space | KeyCode::ArrowUp | KeyCode::KeyW => self.jump = pressed,
-            _ => {}
+            KeyCode::KeyR => {
+            if self.game_over || self.game_won {
+                self.lives = 3;
+                self.score = 0;
+                self.game_won = false;
+                self.game_over = false;
+                self.player.x = -20.0;
+                self.player.y = 200.0;
+                self.player.vel_x = 0.0;
+                self.player.vel_y = 0.0;
+                self.player.on_ground = false;
+                for coin in &mut self.coins {
+                    coin.active = true;
+                }
+                for enemy in &mut self.enemies {
+                    enemy.alive = true;
+                }
+                self.update_score_texture();
+                println!("Game restarted!");
+            }
         }
+            _ => {}
+            
+        }  
     }
 
     fn update(&mut self){
@@ -1103,8 +1166,6 @@ impl State {
                 }
             }
         }
-
-        let enemy_gravity = 400.0;
 
         for enemy in &mut self.enemies {
             if !enemy.alive {continue; }
@@ -1140,6 +1201,11 @@ impl State {
                         self.player.vel_y = -300.0;
                         println!("Enemy destroyed! Score: {}", self.score);
                     }else{
+                        if self.lives == 0{
+                            self.game_over = true;
+                            return;
+                        }
+                        self.lives -= 1;
                         self.player.x = -20.0;
                         self.player.y = 200.0;
                         self.player.vel_x = 0.0;
@@ -1153,13 +1219,18 @@ impl State {
                         for enemy in &mut self.enemies{
                             enemy.alive = true;
                         }
-                        println!("Respawned!");
+                        println!("Respawned! Lives remaining: {}", self.lives);
                         break;
                     }
                 }
             }
 
         if self.player.y > 1500.0 {
+            if self.lives == 0 {
+                self.game_over = true;
+                return;
+            }
+            self.lives -= 1;
             self.player.x = -20.0;
             self.player.y = 200.0;
             self.player.vel_x = 0.0;
@@ -1173,6 +1244,7 @@ impl State {
             for enemy in &mut self.enemies {
                 enemy.alive = true;
             }
+            println!("Respawned! Lives remaining: {}", self.lives);
         }
 
         self.update_score_texture();
@@ -1518,6 +1590,54 @@ impl State {
             render_pass.set_vertex_buffer(0, win_vb.slice(..));
             render_pass.set_index_buffer(win_ib.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..win_indices.len() as u32, 0, 0..1);
+        }
+
+        if self.game_over {
+            let go_w = 512.0;
+            let go_h = 128.0;
+            let go_x = (sw - go_w) / 2.0;
+            let go_y = (sh - go_h) / 2.0 - 50.0;
+
+            let tl = screen_to_clip(go_x, go_y, sw, sh);
+            let tr = screen_to_clip(go_x + go_w, go_y, sw, sh);
+            let br = screen_to_clip(go_x + go_w, go_y + go_h, sw, sh);
+            let bl = screen_to_clip(go_x, go_y + go_h, sw, sh);
+            let go_vertices = vec![
+                Vertex { position: tl, uv: [0.0, 0.0] },
+                Vertex { position: tr, uv: [1.0, 0.0] },
+                Vertex { position: br, uv: [1.0, 1.0] },
+                Vertex { position: bl, uv: [0.0, 1.0] },
+            ];
+            let go_indices = vec![0u16, 1, 2, 0, 2, 3];
+            let go_vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("GameOver VB"),
+                contents: bytemuck::cast_slice(&go_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let go_ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("GameOver IB"),
+                contents: bytemuck::cast_slice(&go_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("GameOver Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            render_pass.set_pipeline(&self.hud_pipeline);
+            render_pass.set_bind_group(0, &self.gameover_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, go_vb.slice(..));
+            render_pass.set_index_buffer(go_ib.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..go_indices.len() as u32, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
