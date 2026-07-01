@@ -11,8 +11,17 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+#[derive(PartialEq)]
+enum GameState {
+    Menu,
+    Playing,
+    GameOver,
+    Won,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
+
 struct Vertex{
     position: [f32; 2],
     uv: [f32; 2],
@@ -193,17 +202,39 @@ fn sprite_to_rgba(sprite: &[[u8; 12]; 16]) -> (Vec<u8>, u32, u32){
     (data, width, height)
 }
 
-fn render_text_to_image(text: &str, font: &Font, font_size: f32, width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+fn render_text_to_image(text: &str, font: &Font, font_size: f32, width: u32, height: u32, bg_color: [u8; 4], border_color: [u8; 4], border_width: u32) -> (Vec<u8>, u32, u32) {
     let scale = Scale::uniform(font_size);
     let glyphs: Vec<_> = font.layout(text, scale, point(0.0, 0.0)).collect();
 
+    let mut max_y: f32 = 0.0;
+    let mut max_x: f32 = 0.0;
+    for g in &glyphs{
+        if let Some(bb) = g.pixel_bounding_box(){
+            max_x = max_x.max(bb.max.x as f32);
+            max_y = max_y.max(bb.max.y as f32);
+        }
+    }
+    let center_off_x = (width as f32 - max_x) / 2.0;
+    let center_off_y = (height as f32 - max_y) / 2.0;
+
     let mut img = ImageBuffer::<Rgba<u8>, _>::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+
+    for y in 0..height{
+        for x in 0..width{
+            let pixel = img.get_pixel_mut(x, y);
+            if x < border_width || x >= width - border_width || y < border_width || y >= height - border_width{
+                *pixel = Rgba(border_color);
+            }else{
+                *pixel = Rgba(bg_color);
+            }
+        }
+    }
 
     for g in glyphs {
         if let Some(_bb) = g.pixel_bounding_box() {
             let pos = g.position();
-            let x_offset = pos.x as i32;
-            let y_offset = pos.y as i32;
+            let x_offset = pos.x as i32 + center_off_x as i32;
+            let y_offset = pos.y as i32 + center_off_y as i32;
             g.draw(|dx, dy, v| {
                 let px = x_offset + dx as i32;
                 let py = y_offset + dy as i32;
@@ -211,7 +242,14 @@ fn render_text_to_image(text: &str, font: &Font, font_size: f32, width: u32, hei
                     let alpha = (v * 255.0) as u8;
                     if alpha > 0 {
                         let pixel = img.get_pixel_mut(px as u32, py as u32);
-                        *pixel = Rgba([255, 255, 255, alpha]);
+                        let current = pixel.0;
+                        let new_alpha = alpha.min(255);
+                                *pixel = Rgba([
+            (current[0] as u32 + ((255 - current[0]) as u32 * new_alpha as u32) / 255).min(255) as u8,
+            (current[1] as u32 + ((255 - current[1]) as u32 * new_alpha as u32) / 255).min(255) as u8,
+            (current[2] as u32 + ((255 - current[2]) as u32 * new_alpha as u32) / 255).min(255) as u8,
+            255
+        ]);
                     }
                 }
             });
@@ -361,7 +399,12 @@ struct State {
     enemy_bind_group: wgpu::BindGroup,
     win_bind_group: wgpu::BindGroup,
     gameover_bind_group: wgpu::BindGroup,
+    title_bind_group: wgpu::BindGroup,
+    play_bind_group: wgpu::BindGroup,
+    game_state: GameState,
     win_texture: wgpu::Texture,
+    cursor_x: f32,
+    cursor_y: f32,
     player: Player,
     platforms: Vec<Platform>,
     coins: Vec<Coin>,
@@ -780,7 +823,7 @@ impl State {
         let win_text = "You Win!".to_string();
         let win_font_data = include_bytes!("../assets/DejaVuSans.ttf");
         let win_font = Font::try_from_bytes(win_font_data).expect("Failed to load font");
-        let (win_img, win_w, win_h) = render_text_to_image(&win_text, &win_font, 100.0, 1024, 256);
+        let (win_img, win_w, win_h) = render_text_to_image(&win_text, &win_font, 100.0, 1024, 256, [20, 30, 60, 180], [255, 255, 255, 255], 4);
         let win_texture_size = wgpu::Extent3d {width: win_w, height: win_h, depth_or_array_layers: 1};
         let win_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("win_texture"),
@@ -815,7 +858,7 @@ impl State {
         let gameover_text = "Game Over".to_string();
         let gameover_font_data = include_bytes!("../assets/DejaVuSans.ttf");
         let gameover_font = Font::try_from_bytes(gameover_font_data).expect("Failed to load font");
-        let (gameover_img, gameover_w, gameover_h) = render_text_to_image(&gameover_text, &gameover_font, 72.0, 512, 128);
+        let (gameover_img, gameover_w, gameover_h) = render_text_to_image(&gameover_text, &gameover_font, 72.0, 512, 128, [20, 30, 60, 180], [255, 255, 255, 255], 4);
         let gameover_texture_size = wgpu::Extent3d{width: gameover_w, height: gameover_h, depth_or_array_layers: 1};
         let gameover_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gameover_texture"),
@@ -848,12 +891,83 @@ impl State {
             label: Some("gameover_bind_group"),
         });
 
+        let title_text = "DEEPFALL".to_string();
+        let title_font_data = include_bytes!("../assets/DejaVuSans.ttf");
+        let title_font = Font::try_from_bytes(title_font_data).expect("Failed to load font");
+        let (title_img, title_w, title_h) = render_text_to_image(&title_text, &title_font, 64.0, 512, 128, [20, 30, 60, 180], [0, 0, 0, 0], 0);
+        let title_texture_size = wgpu::Extent3d {width: title_w, height: title_h, depth_or_array_layers: 1};
+        let title_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("title_texture"),
+            size: title_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{texture: &title_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All},
+            &title_img,
+            wgpu::ImageDataLayout{offset: 0, bytes_per_row: Some(4 * title_w), rows_per_image: Some(title_h)},
+            title_texture_size,
+        );
+        let title_texture_view = title_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let title_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let title_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{binding: 0, resource: wgpu::BindingResource::TextureView(&title_texture_view)},
+                wgpu::BindGroupEntry{binding: 1, resource: wgpu::BindingResource::Sampler(&title_sampler)},
+            ],
+            label: Some("title_bind_group"),
+        });
+
+        let play_text = "PLAY".to_string();
+        let play_font = Font::try_from_bytes(title_font_data).expect("Failed to load font");
+        let (play_img, play_w, play_h) = render_text_to_image(&play_text, &play_font, 40.0, 200, 70, [30, 40, 70, 220], [255, 255, 255, 255], 2);
+        let play_texture_size = wgpu::Extent3d {width: play_w, height: play_h, depth_or_array_layers: 1};
+        let play_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("play_texture"),
+            size: play_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture{texture: &play_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All},
+            &play_img,
+            wgpu::ImageDataLayout{offset: 0, bytes_per_row: Some(4 * play_w), rows_per_image: Some(play_h)},
+            play_texture_size,
+        );
+        let play_texture_view = play_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let play_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let play_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry{binding: 0, resource: wgpu::BindingResource::TextureView(&play_texture_view)},
+                wgpu::BindGroupEntry{binding: 1, resource: wgpu::BindingResource::Sampler(&play_sampler)},
+            ],
+            label: Some("play_bind_group"),
+        });
+
         let font_data = include_bytes!("../assets/DejaVuSans.ttf");
         let font = Font::try_from_bytes(font_data).expect("Failed to load font");
         let font_bytes = font_data.to_vec();
 
         let score_text = "Score: 0".to_string();
-        let (img, width, height) = render_text_to_image(&score_text, &font, 28.0, 256, 64);
+        let (img, width, height) = render_text_to_image(&score_text, &font, 28.0, 256, 64, [0, 0, 0, 150], [0, 0, 0, 0], 0);
 
         let score_texture_size = wgpu::Extent3d{
             width: width as u32,
@@ -1086,12 +1200,17 @@ impl State {
             score_bind_group,
             score_sampler,
             goal,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
             game_won: false,
             lives: 3,
             game_over: false,
+            game_state: GameState::Menu,
             flag_bind_group,
             win_bind_group,
             gameover_bind_group,
+            title_bind_group,
+            play_bind_group,
             win_texture,
             font_bytes,
             coins,
@@ -1116,17 +1235,18 @@ impl State {
         }
     }
 
-    fn input(&mut self, key: KeyCode, pressed: bool){
-        match key {
-            KeyCode::ArrowLeft | KeyCode::KeyA => self.left = pressed,
-            KeyCode::ArrowRight | KeyCode::KeyD => self.right = pressed,
-            KeyCode::Space | KeyCode::ArrowUp | KeyCode::KeyW => self.jump = pressed,
-            KeyCode::KeyR => {
-            if self.game_over || self.game_won {
+    fn input(&mut self, key: KeyCode, pressed: bool) {
+    match key {
+        KeyCode::ArrowLeft | KeyCode::KeyA => self.left = pressed,
+        KeyCode::ArrowRight | KeyCode::KeyD => self.right = pressed,
+        KeyCode::Space | KeyCode::ArrowUp | KeyCode::KeyW => self.jump = pressed,
+        KeyCode::KeyR => {
+            if pressed && (self.game_state == GameState::GameOver || self.game_state == GameState::Won) {
                 self.lives = 3;
                 self.score = 0;
                 self.game_won = false;
                 self.game_over = false;
+                self.game_state = GameState::Playing;
                 self.player.x = -20.0;
                 self.player.y = 200.0;
                 self.player.vel_x = 0.0;
@@ -1142,12 +1262,22 @@ impl State {
                 println!("Game restarted!");
             }
         }
-            _ => {}
-            
-        }  
+        _ => {}
     }
+ }
+
+    
+    
+
+
+    
+
+
 
     fn update(&mut self){
+        if self.game_state != GameState::Playing {
+            return;
+        }
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.last_time).as_secs_f32().min(0.05);
         self.last_time = now;
@@ -1203,6 +1333,7 @@ impl State {
                     }else{
                         if self.lives == 0{
                             self.game_over = true;
+                            self.game_state = GameState::GameOver;
                             return;
                         }
                         self.lives -= 1;
@@ -1228,6 +1359,7 @@ impl State {
         if self.player.y > 1500.0 {
             if self.lives == 0 {
                 self.game_over = true;
+                self.game_state = GameState::GameOver;
                 return;
             }
             self.lives -= 1;
@@ -1640,6 +1772,84 @@ impl State {
             render_pass.draw_indexed(0..go_indices.len() as u32, 0, 0..1);
         }
 
+        if self.game_state == GameState::Menu{
+            let title_w = 512.0;
+            let title_h = 128.0;
+            let title_x = (sw - title_w) / 2.0;
+            let title_y = sh * 0.25 - title_h / 2.0;
+            let tl = screen_to_clip(title_x, title_y, sw, sh);
+            let tr = screen_to_clip(title_x + title_w, title_y, sw, sh);
+            let br = screen_to_clip(title_x + title_w, title_y + title_h, sw, sh);
+            let bl = screen_to_clip(title_x, title_y + title_h, sw, sh);
+            let title_vertices = vec![
+                Vertex { position: tl, uv: [0.0, 0.0] },
+                Vertex { position: tr, uv: [1.0, 0.0] },
+                Vertex { position: br, uv: [1.0, 1.0] },
+                Vertex { position: bl, uv: [0.0, 1.0] },
+            ];
+            let title_indices = vec![0u16, 1, 2, 0, 2, 3];
+            let title_vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Title VB"),
+                contents: bytemuck::cast_slice(&title_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let title_ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Title IB"),
+                contents: bytemuck::cast_slice(&title_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            let play_w = 240.0;
+            let play_h = 80.0;
+            let play_x = (sw - play_w) / 2.0;
+            let play_y = sh * 0.55 - play_h / 2.0;
+            let tl2 = screen_to_clip(play_x, play_y, sw, sh);
+            let tr2 = screen_to_clip(play_x + play_w, play_y, sw, sh);
+            let br2 = screen_to_clip(play_x + play_w, play_y + play_h, sw, sh);
+            let bl2 = screen_to_clip(play_x, play_y + play_h, sw, sh);
+            let play_vertices = vec![
+                Vertex { position: tl2, uv: [0.0, 0.0] },
+                Vertex { position: tr2, uv: [1.0, 0.0] },
+                Vertex { position: br2, uv: [1.0, 1.0] },
+                Vertex { position: bl2, uv: [0.0, 1.0] },
+            ];
+            let play_indices = vec![0u16, 1, 2, 0, 2, 3];
+            let play_vb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Play VB"),
+                contents: bytemuck::cast_slice(&play_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let play_ib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Play IB"),
+                contents: bytemuck::cast_slice(&play_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Menu Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations{
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            render_pass.set_pipeline(&self.hud_pipeline);
+
+            render_pass.set_bind_group(0, &self.title_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, title_vb.slice(..));
+            render_pass.set_index_buffer(title_ib.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..title_indices.len() as u32, 0, 0..1);
+            render_pass.set_bind_group(0, &self.play_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, play_vb.slice(..));
+            render_pass.set_index_buffer(play_ib.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..play_indices.len() as u32, 0, 0..1);
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
@@ -1649,7 +1859,7 @@ impl State {
     fn update_score_texture(&mut self){
         let font = Font::try_from_bytes(&self.font_bytes).expect("Failed to load font");
         let text = format!("Score: {}", self.score);
-        let (img, width, height) = render_text_to_image(&text, &font, 28.0, 256, 64);
+        let (img, width, height) = render_text_to_image(&text, &font, 28.0, 256, 64, [0, 0, 0, 150], [0, 0, 0, 0], 0);
 
         let size = wgpu::Extent3d{
             width,
@@ -1672,7 +1882,33 @@ impl State {
             size,
         );
     }
+
+    fn mouse_moved(&mut self, x: f32, y: f32) {
+    self.cursor_x = x;
+    self.cursor_y = y;
+ }
+
+    fn mouse_clicked(&mut self) {
+    if self.game_state == GameState::Menu {
+        let sw = self.size.width as f32;
+        let sh = self.size.height as f32;
+        let play_w = 200.0;
+        let play_h = 70.0;
+        let play_x = (sw - play_w) / 2.0;
+        let play_y = sh * 0.55 - play_h / 2.0;
+        if self.cursor_x >= play_x && self.cursor_x <= play_x + 256.0
+            && self.cursor_y >= play_y && self.cursor_y <= play_y + 64.0
+        {
+            self.game_state = GameState::Playing;
+            println!("Game started!");
+        }
+    }
+ }
+
 }
+    
+
+
 
 fn main() {
     env_logger::init();
@@ -1705,6 +1941,21 @@ fn main() {
                         } => {
                             state.input(key, key_state == ElementState::Pressed);
                         }
+
+                        WindowEvent::CursorMoved { position, ..} => {
+                            state.mouse_moved(position.x as f32, position.y as f32);
+                        }
+                        WindowEvent::MouseInput{
+                            state: mouse_state,
+                            button: winit::event::MouseButton::Left,
+                            ..
+                        } => {
+                            if mouse_state == ElementState::Pressed{
+                                state.mouse_clicked();
+                            }
+                        }
+
+
                         WindowEvent::RedrawRequested => {
                             state.update();
                             match state.render(){
